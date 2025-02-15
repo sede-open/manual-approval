@@ -18,11 +18,13 @@ type approvalEnvironment struct {
 	approvalIssue       *github.Issue
 	approvalIssueNumber int
 	issueTitle          string
+	issueBody           string
 	issueApprovers      []string
 	minimumApprovals    int
+	failOnDenial        bool
 }
 
-func newApprovalEnvironment(client *github.Client, repoFullName, repoOwner string, runID int, approvers []string, minimumApprovals int, issueTitle string) (*approvalEnvironment, error) {
+func newApprovalEnvironment(client *github.Client, repoFullName, repoOwner string, runID int, approvers []string, minimumApprovals int, issueTitle, issueBody string, failOnDenial bool) (*approvalEnvironment, error) {
 	repoOwnerAndName := strings.Split(repoFullName, "/")
 	if len(repoOwnerAndName) != 2 {
 		return nil, fmt.Errorf("repo owner and name in unexpected format: %s", repoFullName)
@@ -38,11 +40,17 @@ func newApprovalEnvironment(client *github.Client, repoFullName, repoOwner strin
 		issueApprovers:   approvers,
 		minimumApprovals: minimumApprovals,
 		issueTitle:       issueTitle,
+		issueBody:        issueBody,
+		failOnDenial:     failOnDenial,
 	}, nil
 }
 
 func (a approvalEnvironment) runURL() string {
-	return fmt.Sprintf("https://github.com/%s/actions/runs/%d", a.repoFullName, a.runID)
+	baseUrl := a.client.BaseURL.String()
+	if strings.Contains(baseUrl, "github.com") {
+		baseUrl = "https://github.com/"
+	}
+	return fmt.Sprintf("%s%s/actions/runs/%d", baseUrl, a.repoFullName, a.runID)
 }
 
 func (a *approvalEnvironment) createApprovalIssue(ctx context.Context) error {
@@ -63,6 +71,11 @@ Respond %s to continue workflow or %s to cancel.`,
 		formatAcceptedWords(approvedWords),
 		formatAcceptedWords(deniedWords),
 	)
+
+	if a.issueBody != "" {
+		issueBody = fmt.Sprintf("%s\n\n%s", a.issueBody, issueBody)
+	}
+
 	var err error
 	fmt.Printf(
 		"Creating issue in repo %s/%s with the following content:\nTitle: %s\nApprovers: %s\nBody:\n%s\n",
@@ -82,7 +95,7 @@ Respond %s to continue workflow or %s to cancel.`,
 	}
 	a.approvalIssueNumber = a.approvalIssue.GetNumber()
 
-	fmt.Printf("Issue created: %s\n", a.approvalIssue.GetURL())
+	fmt.Printf("Issue created: %s\n", a.approvalIssue.GetHTMLURL())
 	return nil
 }
 
@@ -138,10 +151,14 @@ func approversIndex(approvers []string, name string) int {
 
 func isApproved(commentBody string) (bool, error) {
 	for _, approvedWord := range approvedWords {
-		matched, err := regexp.MatchString(fmt.Sprintf("(?i)^%s[.!]*\n*$", approvedWord), commentBody)
+		re, err := regexp.Compile(fmt.Sprintf("(?i)^%s[.!]*\n*\\s*$", approvedWord))
 		if err != nil {
+			fmt.Printf("Error parsing. %v", err)
 			return false, err
 		}
+
+		matched := re.MatchString(commentBody)
+
 		if matched {
 			return true, nil
 		}
@@ -152,10 +169,12 @@ func isApproved(commentBody string) (bool, error) {
 
 func isDenied(commentBody string) (bool, error) {
 	for _, deniedWord := range deniedWords {
-		matched, err := regexp.MatchString(fmt.Sprintf("(?i)^%s[.!]*\n*$", deniedWord), commentBody)
+		re, err := regexp.Compile(fmt.Sprintf("(?i)^%s[.!]*\n*\\s*$", deniedWord))
 		if err != nil {
+			fmt.Printf("Error parsing. %v", err)
 			return false, err
 		}
+		matched := re.MatchString(commentBody)
 		if matched {
 			return true, nil
 		}
